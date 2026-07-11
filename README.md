@@ -1,6 +1,6 @@
 # Temper Monkey Script for Twitch
 ## Install <a href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo">Temper Monkey</a> extension on chrome and paste the script file in it save and its gonna work!
-
+## Works with 7TV!!!
 ### Chatters Block
 Choose chatters you want to hide!
 
