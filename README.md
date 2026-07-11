@@ -1,5 +1,5 @@
 ### Temper Monkey Script for Twitch
-
+# Install Temper Monkey extension on chrome and paste the script file in it save and its gonna work!
 
 Chatters Block
 
