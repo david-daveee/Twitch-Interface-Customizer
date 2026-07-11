@@ -1,16 +1,16 @@
 # Temper Monkey Script for Twitch
 ## Install <a href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo">Temper Monkey</a> extension on chrome and paste the script file in it save and its gonna work!
 
-Chatters Block
-
+### Chatters Block
+Choose chatters you want to hide!
 <img width="348" height="888" alt="image" src="https://github.com/user-attachments/assets/b3745d7b-9fde-478e-ad7f-45fa21707575" />
 
-Streamers Block
-
+### Streamers Block
+Choose streamers you want to hide!
 <img width="236" height="934" alt="image" src="https://github.com/user-attachments/assets/2dcbdfbf-b947-4a87-8356-2f3a4be2808b" />
 
-Customize Buttons
-
+### Customize Buttons
+Choose which button you want to hide!
 <img width="1915" height="940" alt="image" src="https://github.com/user-attachments/assets/f0af1b1f-dda5-4f2c-8369-48a385020bc5" />
 
 
