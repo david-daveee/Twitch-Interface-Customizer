@@ -6,6 +6,7 @@ Chatters Block
 Streamers Block
 <img width="236" height="934" alt="image" src="https://github.com/user-attachments/assets/2dcbdfbf-b947-4a87-8356-2f3a4be2808b" />
 Customize Buttons
-![Uploading image.png…]()
+<img width="1915" height="940" alt="image" src="https://github.com/user-attachments/assets/f0af1b1f-dda5-4f2c-8369-48a385020bc5" />
+
 
 
