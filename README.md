@@ -1,4 +1,4 @@
-### TEMPER MONKEY SCRIPT FOR TWITCH
+### Temper Monkey Script for Twitch
 
 
 Chatters Block
