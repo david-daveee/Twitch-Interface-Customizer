@@ -1,0 +1,3144 @@
+// ==UserScript==
+// @name         Twitch Interface Customizer
+// @namespace    http://tampermonkey.net/
+// @version      5.0.0
+// @description  Sidebar streamer filter, interface button filter and Twitch/7TV chat user filter
+// @author       YourName
+// @match        https://*.twitch.tv/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // =========================================================
+    // GENERAL HELPERS
+    // =========================================================
+
+    function normalizeText(value) {
+        return String(value || '')
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, ' ');
+    }
+
+    function normalizeUsername(value) {
+        return String(value || '')
+            .trim()
+            .replace(/^@+/, '')
+            .replace(/:$/, '')
+            .toLowerCase();
+    }
+
+    function escapeRegExp(value) {
+        return String(value)
+            .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function stopEvent(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+    }
+
+    function isVisible(element) {
+        if (
+            !element ||
+            !element.isConnected
+        ) {
+            return false;
+        }
+
+        const rect =
+            element.getBoundingClientRect();
+
+        const computedStyle =
+            getComputedStyle(element);
+
+        return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            rect.bottom > 0 &&
+            rect.top < window.innerHeight &&
+            computedStyle.display !== 'none' &&
+            computedStyle.visibility !== 'hidden'
+        );
+    }
+
+    // =========================================================
+    // FEATURE 1 — SIDEBAR STREAMER FILTER
+    // =========================================================
+
+    let hiddenStreamers =
+        GM_getValue('hiddenStreamers', []);
+
+    let tempHiddenStreamers =
+        [...hiddenStreamers];
+
+    let isSidebarEditMode = false;
+
+    // =========================================================
+    // FEATURE 2 — TWITCH INTERFACE BUTTON FILTER
+    // =========================================================
+
+    const defaultHiddenElements = {
+        follow: false,
+        bell: false,
+
+        bitsHeader: false,
+        bitsChat: false,
+        channelPoints: false,
+
+        gift: false,
+        sub: false,
+        share: false,
+        more: false,
+
+        topNotifications: false,
+        topPrime: false,
+        topWhispers: false,
+        topDrops: false,
+        topAdFree: false
+    };
+
+    const savedHiddenElements =
+        GM_getValue('hiddenElements', {});
+
+    if (
+        savedHiddenElements.bits !== undefined &&
+        savedHiddenElements.bitsHeader === undefined
+    ) {
+        savedHiddenElements.bitsHeader =
+            savedHiddenElements.bits;
+    }
+
+    delete savedHiddenElements.bits;
+
+    let hiddenElements = {
+        ...defaultHiddenElements,
+        ...savedHiddenElements
+    };
+
+    GM_setValue(
+        'hiddenElements',
+        { ...hiddenElements }
+    );
+
+    let isInterfaceEditMode = false;
+
+    // =========================================================
+    // FEATURE 3 — TWITCH + 7TV CHAT USER FILTER
+    // =========================================================
+
+    const CHAT_STORAGE_KEY =
+        'twitchChatHiddenUsers7TV';
+
+    let hiddenChatUsers =
+        loadHiddenChatUsers();
+
+    let draftHiddenChatUsers =
+        new Set(hiddenChatUsers);
+
+    let isChatPanelOpen = false;
+
+    const originalChatTextNodes =
+        new WeakMap();
+
+    let chatPanel = null;
+    let chatUsersContainer = null;
+
+    function loadHiddenChatUsers() {
+        const saved =
+            GM_getValue(
+                CHAT_STORAGE_KEY,
+                []
+            );
+
+        if (!Array.isArray(saved)) {
+            return new Set();
+        }
+
+        return new Set(
+            saved
+                .map(normalizeUsername)
+                .filter(Boolean)
+        );
+    }
+
+    function saveHiddenChatUsers() {
+        GM_setValue(
+            CHAT_STORAGE_KEY,
+            [...hiddenChatUsers]
+        );
+    }
+
+    function isChatFilterElement(element) {
+        return Boolean(
+            element?.closest?.(
+                '.tm-chat-filter-header-root, ' +
+                '.tm-chat-filter-panel'
+            )
+        );
+    }
+
+    // =========================================================
+    // CSS
+    // =========================================================
+
+    const style =
+        document.createElement('style');
+
+    style.textContent = `
+        /* =====================================================
+           FEATURE 1 — SIDEBAR FILTER
+           ===================================================== */
+
+        .custom-filter-container {
+            width: 100%;
+            padding: 10px 12px 5px;
+            box-sizing: border-box;
+        }
+
+        .custom-filter-btn {
+            width: 100%;
+
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            padding: 8px 12px;
+
+            background:
+                var(--color-background-button-secondary-default);
+
+            border:
+                1px solid var(--color-border-base);
+
+            border-radius: 6px;
+
+            color:
+                var(--color-text-base);
+
+            font-size: 14px;
+            font-weight: bold;
+
+            cursor: pointer;
+        }
+
+        .custom-filter-btn:hover {
+            background:
+                var(--color-background-button-hover);
+        }
+
+        .custom-filter-box {
+            position: absolute;
+
+            top: 50px;
+            left: 12px;
+            right: 12px;
+
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+
+            padding: 14px;
+
+            background:
+                var(--color-background-body);
+
+            border:
+                1px solid var(--color-border-base);
+
+            border-radius: 6px;
+
+            box-shadow:
+                0 6px 16px rgba(0, 0, 0, 0.6);
+
+            color:
+                var(--color-text-base);
+
+            z-index: 99999;
+        }
+
+        .custom-filter-box.active {
+            display: flex;
+        }
+
+        .custom-box-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .custom-box-btn {
+            flex: 1;
+
+            padding: 6px 10px;
+
+            border: none;
+            border-radius: 4px;
+
+            font-size: 13px;
+            font-weight: bold;
+
+            cursor: pointer;
+        }
+
+        .btn-save {
+            background:
+                var(--color-background-accent);
+
+            color: white;
+        }
+
+        .btn-reset {
+            background:
+                var(--color-background-button-secondary-default);
+
+            color:
+                var(--color-text-base);
+        }
+
+        .streamer-filter-chk {
+            display: none;
+
+            position: relative;
+
+            margin-left: 6px;
+            margin-right: 10px;
+
+            transform: scale(1.4);
+
+            cursor: pointer;
+
+            z-index: 999999 !important;
+        }
+
+        .streamer-filter-chk.show {
+            display: inline-block;
+        }
+
+        /* =====================================================
+           FEATURE 2 — INTERFACE BUTTON FILTER
+           ===================================================== */
+
+        .channel-customize-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+
+            position: relative;
+
+            width: 28px;
+            min-width: 28px;
+            height: 28px;
+
+            margin-left: 8px;
+            padding: 0;
+
+            background:
+                var(--color-background-button-secondary-default);
+
+            border:
+                1px solid var(--color-border-base);
+
+            border-radius: 6px;
+
+            color:
+                var(--color-text-base);
+
+            font-size: 15px;
+            font-weight: bold;
+            line-height: 1;
+
+            cursor: pointer;
+
+            z-index: 99999;
+        }
+
+        .channel-customize-btn:hover {
+            background:
+                var(--color-background-button-hover);
+        }
+
+        .channel-customize-btn.active-mode {
+            background:
+                var(--color-background-accent);
+
+            color: white;
+            border-color: transparent;
+        }
+
+        .tm-customizable-control {
+            position: relative !important;
+        }
+
+        .tm-control-checkbox {
+            display: none !important;
+
+            position: absolute !important;
+
+            top: 50% !important;
+            left: 50% !important;
+
+            width: 19px !important;
+            height: 19px !important;
+
+            margin: 0 !important;
+            padding: 0 !important;
+
+            transform:
+                translate(-50%, -50%) !important;
+
+            accent-color:
+                var(--color-background-accent);
+
+            cursor: pointer !important;
+            pointer-events: auto !important;
+
+            z-index: 2147483647 !important;
+        }
+
+        .tm-control-checkbox.show {
+            display: block !important;
+        }
+
+        .tm-customizable-control.tm-control-editing
+        > :not(.tm-control-checkbox) {
+            opacity: 0.18 !important;
+            pointer-events: none !important;
+        }
+
+        .tm-customizable-control.tm-control-editing::after {
+            content: "";
+
+            position: absolute;
+            inset: 0;
+
+            border:
+                2px solid var(--color-background-accent);
+
+            border-radius: inherit;
+
+            pointer-events: none;
+
+            z-index: 999999;
+        }
+
+        /* =====================================================
+           FEATURE 3 — CHAT HEADER BUTTON
+           ===================================================== */
+
+        .tm-chat-filter-header-root {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+
+            align-self: center !important;
+
+            position: relative !important;
+
+            width: 30px !important;
+            min-width: 30px !important;
+            height: 30px !important;
+
+            margin: 0 2px 0 0 !important;
+            padding: 0 !important;
+
+            flex: 0 0 30px !important;
+
+            overflow: visible !important;
+
+            pointer-events: auto !important;
+
+            z-index: 2147483640 !important;
+        }
+
+        .tm-chat-filter-header-button {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+
+            width: 30px !important;
+            min-width: 30px !important;
+            height: 30px !important;
+
+            margin: 0 !important;
+            padding: 0 !important;
+
+            flex: 0 0 30px !important;
+
+            background: transparent !important;
+
+            border: 0 !important;
+            border-radius: 5px !important;
+
+            color:
+                var(--color-text-base, #efeff1) !important;
+
+            cursor: pointer !important;
+            pointer-events: auto !important;
+
+            line-height: 0 !important;
+        }
+
+        .tm-chat-filter-header-button:hover {
+            background:
+                var(
+                    --color-background-button-text-hover,
+                    rgba(255, 255, 255, 0.12)
+                ) !important;
+        }
+
+        .tm-chat-filter-header-button.active {
+            background:
+                var(--color-background-accent, #9147ff) !important;
+
+            color: white !important;
+        }
+
+        .tm-chat-filter-header-button svg {
+            display: block !important;
+
+            width: 18px !important;
+            height: 18px !important;
+
+            margin: 0 !important;
+            padding: 0 !important;
+
+            fill: currentColor !important;
+
+            pointer-events: none !important;
+        }
+
+        /* =====================================================
+           FEATURE 3 — CHAT USER PANEL
+           ===================================================== */
+
+        .tm-chat-filter-panel {
+            display: none !important;
+
+            position: fixed !important;
+
+            width: 265px !important;
+            max-height: 470px !important;
+
+            margin: 0 !important;
+            padding: 10px !important;
+
+            background:
+                var(--color-background-body, #18181b) !important;
+
+            border:
+                1px solid
+                var(--color-border-base, #464649) !important;
+
+            border-radius: 8px !important;
+
+            box-shadow:
+                0 8px 30px rgba(0, 0, 0, 0.9) !important;
+
+            color:
+                var(--color-text-base, #efeff1) !important;
+
+            box-sizing: border-box !important;
+
+            pointer-events: auto !important;
+
+            z-index: 2147483647 !important;
+        }
+
+        .tm-chat-filter-panel.show {
+            display: block !important;
+        }
+
+        .tm-chat-filter-title-row {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+
+            margin-bottom: 8px !important;
+        }
+
+        .tm-chat-filter-title {
+            font-size: 13px !important;
+            font-weight: 700 !important;
+        }
+
+        .tm-chat-filter-count {
+            color:
+                var(--color-text-alt, #adadb8) !important;
+
+            font-size: 11px !important;
+        }
+
+        .tm-chat-filter-users {
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 2px !important;
+
+            max-height: 350px !important;
+
+            padding: 2px 3px 2px 0 !important;
+
+            overflow-x: hidden !important;
+            overflow-y: auto !important;
+        }
+
+        .tm-chat-filter-user-row {
+            display: flex !important;
+            align-items: center !important;
+
+            min-height: 30px !important;
+
+            margin: 0 !important;
+            padding: 4px 6px !important;
+
+            border-radius: 5px !important;
+
+            box-sizing: border-box !important;
+
+            cursor: pointer !important;
+            user-select: none !important;
+        }
+
+        .tm-chat-filter-user-row:hover {
+            background:
+                var(
+                    --color-background-button-text-hover,
+                    rgba(255, 255, 255, 0.1)
+                ) !important;
+        }
+
+        .tm-chat-filter-user-checkbox {
+            appearance: auto !important;
+            -webkit-appearance: checkbox !important;
+
+            display: block !important;
+
+            width: 15px !important;
+            min-width: 15px !important;
+            height: 15px !important;
+
+            margin: 0 8px 0 0 !important;
+            padding: 0 !important;
+
+            accent-color:
+                var(--color-background-accent, #9147ff) !important;
+
+            cursor: pointer !important;
+        }
+
+        .tm-chat-filter-user-name {
+            flex: 1 !important;
+
+            min-width: 0 !important;
+
+            overflow: hidden !important;
+
+            font-size: 13px !important;
+            font-weight: 600 !important;
+
+            text-overflow: ellipsis !important;
+            white-space: nowrap !important;
+        }
+
+        .tm-chat-filter-user-status {
+            margin-left: 7px !important;
+
+            color:
+                var(--color-text-alt, #adadb8) !important;
+
+            font-size: 10px !important;
+        }
+
+        .tm-chat-filter-empty-list {
+            padding: 18px 8px !important;
+
+            color:
+                var(--color-text-alt, #adadb8) !important;
+
+            font-size: 12px !important;
+            text-align: center !important;
+        }
+
+        .tm-chat-filter-actions {
+            display: flex !important;
+            gap: 6px !important;
+
+            margin-top: 9px !important;
+        }
+
+        .tm-chat-filter-action {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+
+            height: 30px !important;
+
+            margin: 0 !important;
+            padding: 0 9px !important;
+
+            border: 0 !important;
+            border-radius: 5px !important;
+
+            font-size: 12px !important;
+            font-weight: 700 !important;
+
+            cursor: pointer !important;
+        }
+
+        .tm-chat-filter-save {
+            flex: 1 !important;
+
+            background:
+                var(--color-background-accent, #9147ff) !important;
+
+            color: white !important;
+        }
+
+        .tm-chat-filter-reset {
+            flex: 1 !important;
+
+            background:
+                var(
+                    --color-background-button-secondary-default,
+                    #3f3f46
+                ) !important;
+
+            color:
+                var(--color-text-base, #efeff1) !important;
+        }
+
+        .tm-chat-filter-refresh {
+            width: 34px !important;
+            min-width: 34px !important;
+
+            background:
+                var(
+                    --color-background-button-secondary-default,
+                    #3f3f46
+                ) !important;
+
+            color:
+                var(--color-text-base, #efeff1) !important;
+
+            font-size: 16px !important;
+        }
+
+        .tm-chat-filter-hidden-message {
+            display: none !important;
+        }
+    `;
+
+    document.head.appendChild(style);
+
+    // =========================================================
+    // FEATURE 1 — SIDEBAR FILTER
+    // =========================================================
+
+    function applySidebarFilter() {
+        const cards =
+            document.querySelectorAll(
+                [
+                    '[data-a-target="side-nav-card"]',
+                    '.side-nav-card',
+                    '[data-a-target="side-nav-arrow-card"]'
+                ].join(', ')
+            );
+
+        cards.forEach(card => {
+            const nameElement =
+                card.querySelector(
+                    [
+                        'p[data-a-target="side-nav-card-metadata-username"]',
+                        '.side-nav-card__title',
+                        'span[title]'
+                    ].join(', ')
+                );
+
+            if (!nameElement) {
+                return;
+            }
+
+            const streamerName =
+                normalizeUsername(
+                    nameElement.textContent
+                );
+
+            const mainContainer =
+                card.closest(
+                    '[data-a-target="side-nav-card"]'
+                ) ||
+                card.closest('.side-nav-card') ||
+                card;
+
+            if (
+                hiddenStreamers.includes(
+                    streamerName
+                ) &&
+                !isSidebarEditMode
+            ) {
+                mainContainer.style.display =
+                    'none';
+            } else {
+                mainContainer.style.display =
+                    '';
+            }
+
+            let checkbox =
+                mainContainer.querySelector(
+                    '.streamer-filter-chk'
+                );
+
+            if (!checkbox) {
+                checkbox =
+                    document.createElement('input');
+
+                checkbox.type = 'checkbox';
+
+                checkbox.className =
+                    'streamer-filter-chk';
+
+                checkbox.addEventListener(
+                    'click',
+                    event => {
+                        event.stopPropagation();
+                    }
+                );
+
+                checkbox.addEventListener(
+                    'change',
+                    () => {
+                        if (checkbox.checked) {
+                            if (
+                                !tempHiddenStreamers
+                                    .includes(
+                                        streamerName
+                                    )
+                            ) {
+                                tempHiddenStreamers
+                                    .push(
+                                        streamerName
+                                    );
+                            }
+                        } else {
+                            tempHiddenStreamers =
+                                tempHiddenStreamers
+                                    .filter(
+                                        name =>
+                                            name !==
+                                            streamerName
+                                    );
+                        }
+                    }
+                );
+
+                const link =
+                    mainContainer
+                        .querySelector('a') ||
+                    mainContainer.firstChild;
+
+                if (link) {
+                    link.style.display =
+                        'flex';
+
+                    link.style.alignItems =
+                        'center';
+
+                    link.insertBefore(
+                        checkbox,
+                        link.firstChild
+                    );
+                }
+            }
+
+            checkbox.checked =
+                tempHiddenStreamers
+                    .includes(
+                        streamerName
+                    );
+
+            checkbox.classList.toggle(
+                'show',
+                isSidebarEditMode
+            );
+        });
+    }
+
+    function injectSidebarControls() {
+        const sidebar =
+            document.querySelector(
+                [
+                    '[data-a-target="side-nav-bar"]',
+                    '.side-nav-bar'
+                ].join(', ')
+            );
+
+        if (
+            !sidebar ||
+            document.querySelector(
+                '.custom-filter-container'
+            )
+        ) {
+            return;
+        }
+
+        const container =
+            document.createElement('div');
+
+        container.className =
+            'custom-filter-container';
+
+        container.style.position =
+            'relative';
+
+        const toggle =
+            document.createElement('button');
+
+        toggle.type = 'button';
+
+        toggle.className =
+            'custom-filter-btn';
+
+        toggle.textContent =
+            '⚙ Filter list';
+
+        const box =
+            document.createElement('div');
+
+        box.className =
+            'custom-filter-box';
+
+        box.innerHTML = `
+            <div style="
+                font-size: 13px;
+                font-weight: 600;
+            ">
+                Select streamers to hide:
+            </div>
+
+            <div class="custom-box-actions">
+                <button
+                    type="button"
+                    class="custom-box-btn btn-save"
+                >
+                    Save
+                </button>
+
+                <button
+                    type="button"
+                    class="custom-box-btn btn-reset"
+                >
+                    Reset
+                </button>
+            </div>
+        `;
+
+        container.append(
+            toggle,
+            box
+        );
+
+        sidebar.insertBefore(
+            container,
+            sidebar.firstChild
+        );
+
+        toggle.addEventListener(
+            'click',
+            () => {
+                isSidebarEditMode =
+                    !isSidebarEditMode;
+
+                if (isSidebarEditMode) {
+                    tempHiddenStreamers =
+                        [...hiddenStreamers];
+                }
+
+                box.classList.toggle(
+                    'active',
+                    isSidebarEditMode
+                );
+
+                applySidebarFilter();
+            }
+        );
+
+        box.querySelector('.btn-save')
+            .addEventListener(
+                'click',
+                event => {
+                    event.stopPropagation();
+
+                    hiddenStreamers =
+                        [...tempHiddenStreamers];
+
+                    GM_setValue(
+                        'hiddenStreamers',
+                        hiddenStreamers
+                    );
+
+                    isSidebarEditMode =
+                        false;
+
+                    box.classList.remove(
+                        'active'
+                    );
+
+                    applySidebarFilter();
+                }
+            );
+
+        box.querySelector('.btn-reset')
+            .addEventListener(
+                'click',
+                event => {
+                    event.stopPropagation();
+
+                    hiddenStreamers = [];
+                    tempHiddenStreamers = [];
+
+                    GM_setValue(
+                        'hiddenStreamers',
+                        []
+                    );
+
+                    isSidebarEditMode =
+                        false;
+
+                    box.classList.remove(
+                        'active'
+                    );
+
+                    applySidebarFilter();
+                }
+            );
+    }
+
+    // =========================================================
+    // FEATURE 2 — CONTROL IDENTIFICATION
+    // =========================================================
+
+    function getControlText(element) {
+        const values = [
+            element.textContent,
+            element.getAttribute(
+                'aria-label'
+            ),
+            element.getAttribute(
+                'title'
+            ),
+            element.getAttribute(
+                'data-a-target'
+            ),
+            element.getAttribute(
+                'data-test-selector'
+            )
+        ];
+
+        element
+            .querySelectorAll(
+                [
+                    '[aria-label]',
+                    '[title]',
+                    '[data-a-target]',
+                    '[data-test-selector]'
+                ].join(', ')
+            )
+            .forEach(child => {
+                values.push(
+                    child.getAttribute(
+                        'aria-label'
+                    ),
+                    child.getAttribute(
+                        'title'
+                    ),
+                    child.getAttribute(
+                        'data-a-target'
+                    ),
+                    child.getAttribute(
+                        'data-test-selector'
+                    )
+                );
+            });
+
+        return normalizeText(
+            values.join(' ')
+        );
+    }
+
+    function hasSelector(
+        element,
+        selectors
+    ) {
+        return selectors.some(
+            selector => {
+                try {
+                    return (
+                        element.matches(
+                            selector
+                        ) ||
+                        Boolean(
+                            element.querySelector(
+                                selector
+                            )
+                        )
+                    );
+                } catch {
+                    return false;
+                }
+            }
+        );
+    }
+
+    function isInTopNav(element) {
+        return Boolean(
+            element.closest(
+                [
+                    'nav',
+                    'header',
+                    '[data-a-target="top-nav-container"]',
+                    '[data-test-selector*="top-nav"]',
+                    '.top-nav',
+                    '[class*="top-nav"]'
+                ].join(', ')
+            )
+        );
+    }
+
+    function isInChatInput(element) {
+        return Boolean(
+            element.closest(
+                [
+                    '[data-a-target="chat-input"]',
+                    '[data-a-target="chat-input-container"]',
+                    '[data-test-selector*="chat-input"]',
+                    '.chat-input',
+                    '[class*="chat-input"]'
+                ].join(', ')
+            )
+        );
+    }
+
+    function identifyControl(element) {
+        if (!(element instanceof HTMLElement)) {
+            return null;
+        }
+
+        if (
+            element.classList.contains(
+                'channel-customize-btn'
+            ) ||
+            isChatFilterElement(element)
+        ) {
+            return null;
+        }
+
+        if (
+            element.closest(
+                [
+                    '[data-a-target="side-nav-bar"]',
+                    '.side-nav-bar'
+                ].join(', ')
+            )
+        ) {
+            return null;
+        }
+
+        const text =
+            getControlText(element);
+
+        const top =
+            isInTopNav(element);
+
+        const chat =
+            isInChatInput(element);
+
+        if (
+            top &&
+            (
+                hasSelector(element, [
+                    '[data-a-target*="ad-free"]',
+                    '[data-test-selector*="ad-free"]',
+                    '[data-a-target*="turbo"]'
+                ]) ||
+                text.includes('ad-free') ||
+                text.includes('ad free') ||
+                text.includes('try 1-month') ||
+                text.includes('try 1 month')
+            )
+        ) {
+            return 'topAdFree';
+        }
+
+        if (
+            top &&
+            (
+                hasSelector(element, [
+                    '[data-a-target*="prime"]',
+                    '[data-test-selector*="prime"]',
+                    '[data-a-target*="loot"]'
+                ]) ||
+                text.includes('prime gaming') ||
+                text.includes('prime loot')
+            )
+        ) {
+            return 'topPrime';
+        }
+
+        if (
+            top &&
+            (
+                hasSelector(element, [
+                    '[data-a-target*="whisper"]',
+                    '[data-test-selector*="whisper"]',
+                    '[data-a-target*="message"]'
+                ]) ||
+                text.includes('whisper') ||
+                text.includes('direct message')
+            )
+        ) {
+            return 'topWhispers';
+        }
+
+        if (
+            top &&
+            (
+                hasSelector(element, [
+                    '[data-a-target*="drop"]',
+                    '[data-test-selector*="drop"]',
+                    '[data-a-target*="reward"]'
+                ]) ||
+                text.includes('drops') ||
+                text.includes('rewards')
+            )
+        ) {
+            return 'topDrops';
+        }
+
+        if (
+            top &&
+            (
+                hasSelector(element, [
+                    '[data-a-target*="notification"]',
+                    '[data-test-selector*="notification"]',
+                    '[data-a-target*="inbox"]'
+                ]) ||
+                text.includes('notification') ||
+                text.includes('inbox')
+            )
+        ) {
+            return 'topNotifications';
+        }
+
+        if (
+            hasSelector(element, [
+                '[data-a-target*="community-points"]',
+                '[data-test-selector*="community-points"]',
+                '[data-a-target*="channel-points"]',
+                '[data-test-selector*="channel-points"]',
+                '[data-a-target*="loyalty"]'
+            ]) ||
+            text.includes('community points') ||
+            text.includes('channel points') ||
+            text.includes('claim bonus') ||
+            text.includes('points balance')
+        ) {
+            return 'channelPoints';
+        }
+
+        if (
+            chat &&
+            (
+                hasSelector(element, [
+                    '[data-a-target*="bits"]',
+                    '[data-test-selector*="bits"]',
+                    '[data-a-target*="cheer"]'
+                ]) ||
+                text.includes('bits') ||
+                text.includes('cheer')
+            )
+        ) {
+            return 'bitsChat';
+        }
+
+        if (
+            !chat &&
+            (
+                hasSelector(element, [
+                    '[data-a-target*="bits"]',
+                    '[data-test-selector*="bits"]',
+                    '[data-a-target*="cheer"]'
+                ]) ||
+                text.includes('bits:') ||
+                text.includes('% off')
+            )
+        ) {
+            return 'bitsHeader';
+        }
+
+        if (
+            hasSelector(element, [
+                '[data-a-target="follow-button"]',
+                '[data-a-target="unfollow-button"]',
+                '[data-a-target*="follow"]'
+            ]) ||
+            text === 'follow' ||
+            text.includes('unfollow')
+        ) {
+            return 'follow';
+        }
+
+        if (
+            !top &&
+            (
+                hasSelector(element, [
+                    '[data-a-target*="notification"]',
+                    '[data-test-selector*="notification"]',
+                    '[data-a-target*="bell"]'
+                ]) ||
+                text.includes('bell')
+            )
+        ) {
+            return 'bell';
+        }
+
+        if (
+            hasSelector(element, [
+                '[data-a-target*="gift-a-sub"]',
+                '[data-a-target*="gift-sub"]'
+            ]) ||
+            text.includes('gift a sub') ||
+            text.includes('gift subscription')
+        ) {
+            return 'gift';
+        }
+
+        if (
+            hasSelector(element, [
+                '[data-a-target="subscribe-button"]',
+                '[data-a-target="sub-button"]',
+                '[data-a-target*="subscribe"]'
+            ]) ||
+            text.includes('subscribe') ||
+            text.includes('subscription')
+        ) {
+            return 'sub';
+        }
+
+        if (
+            hasSelector(element, [
+                '[data-a-target*="share"]',
+                '[data-test-selector*="share"]'
+            ]) ||
+            text.includes('share')
+        ) {
+            return 'share';
+        }
+
+        if (
+            hasSelector(element, [
+                '[data-a-target*="more"]',
+                '[data-test-selector*="more"]',
+                '[data-a-target*="overflow"]'
+            ]) ||
+            text.includes('more options') ||
+            text.includes('more actions')
+        ) {
+            return 'more';
+        }
+
+        return null;
+    }
+
+    function createInterfaceCheckbox(
+        element,
+        key
+    ) {
+        const checkbox =
+            document.createElement('input');
+
+        checkbox.type = 'checkbox';
+
+        checkbox.className =
+            'tm-control-checkbox';
+
+        checkbox.dataset.tmKey =
+            key;
+
+        checkbox.title =
+            `Hide element: ${key}`;
+
+        [
+            'pointerdown',
+            'mousedown',
+            'mouseup',
+            'click'
+        ].forEach(eventName => {
+            checkbox.addEventListener(
+                eventName,
+                event => {
+                    event.stopPropagation();
+                    event.stopImmediatePropagation();
+                },
+                true
+            );
+        });
+
+        checkbox.addEventListener(
+            'change',
+            event => {
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+
+                const currentKey =
+                    checkbox.dataset.tmKey;
+
+                hiddenElements[currentKey] =
+                    checkbox.checked;
+
+                GM_setValue(
+                    'hiddenElements',
+                    { ...hiddenElements }
+                );
+            }
+        );
+
+        element.appendChild(
+            checkbox
+        );
+
+        return checkbox;
+    }
+
+    function applyInterfaceVisibility() {
+        document
+            .querySelectorAll(
+                [
+                    'button',
+                    'a[role="button"]',
+                    '[role="button"]'
+                ].join(', ')
+            )
+            .forEach(element => {
+                const key =
+                    identifyControl(element);
+
+                if (!key) {
+                    return;
+                }
+
+                element.classList.add(
+                    'tm-customizable-control'
+                );
+
+                element.dataset.tmControlKey =
+                    key;
+
+                const shouldHide =
+                    Boolean(
+                        hiddenElements[key]
+                    ) &&
+                    !isInterfaceEditMode;
+
+                if (shouldHide) {
+                    element.style.setProperty(
+                        'display',
+                        'none',
+                        'important'
+                    );
+                } else {
+                    element.style.removeProperty(
+                        'display'
+                    );
+                }
+
+                let checkbox =
+                    element.querySelector(
+                        ':scope > .tm-control-checkbox'
+                    );
+
+                if (!checkbox) {
+                    checkbox =
+                        createInterfaceCheckbox(
+                            element,
+                            key
+                        );
+                }
+
+                checkbox.dataset.tmKey =
+                    key;
+
+                checkbox.checked =
+                    Boolean(
+                        hiddenElements[key]
+                    );
+
+                checkbox.classList.toggle(
+                    'show',
+                    isInterfaceEditMode
+                );
+
+                element.classList.toggle(
+                    'tm-control-editing',
+                    isInterfaceEditMode
+                );
+            });
+    }
+
+    function blockInterfaceButton(event) {
+        if (!isInterfaceEditMode) {
+            return;
+        }
+
+        if (
+            !(event.target instanceof Element)
+        ) {
+            return;
+        }
+
+        if (
+            event.target.classList.contains(
+                'tm-control-checkbox'
+            )
+        ) {
+            return;
+        }
+
+        const control =
+            event.target.closest(
+                '.tm-customizable-control'
+            );
+
+        if (control) {
+            stopEvent(event);
+        }
+    }
+
+    document.addEventListener(
+        'pointerdown',
+        blockInterfaceButton,
+        true
+    );
+
+    document.addEventListener(
+        'click',
+        blockInterfaceButton,
+        true
+    );
+
+    function updateInterfaceButton() {
+        const button =
+            document.querySelector(
+                '.channel-customize-btn'
+            );
+
+        if (!button) {
+            return;
+        }
+
+        button.textContent =
+            isInterfaceEditMode
+                ? '✓'
+                : '⚙';
+
+        button.title =
+            isInterfaceEditMode
+                ? 'Finish editing'
+                : 'Choose interface buttons to hide';
+
+        button.classList.toggle(
+            'active-mode',
+            isInterfaceEditMode
+        );
+    }
+
+    function injectInterfaceButton() {
+        const header =
+            document.querySelector(
+                [
+                    '[data-a-target="channel-header-user-name"]',
+                    '.channel-info-content h1',
+                    'h1.tw-title'
+                ].join(', ')
+            );
+
+        if (
+            !header ||
+            document.querySelector(
+                '.channel-customize-btn'
+            )
+        ) {
+            return;
+        }
+
+        const button =
+            document.createElement('button');
+
+        button.type = 'button';
+
+        button.className =
+            'channel-customize-btn';
+
+        button.addEventListener(
+            'click',
+            event => {
+                stopEvent(event);
+
+                isInterfaceEditMode =
+                    !isInterfaceEditMode;
+
+                updateInterfaceButton();
+                applyInterfaceVisibility();
+            },
+            true
+        );
+
+        header.appendChild(
+            button
+        );
+
+        updateInterfaceButton();
+    }
+
+    // =========================================================
+    // FEATURE 3 — MESSAGE ROOT: TWITCH + 7TV
+    // =========================================================
+
+    function getChatMessageRoot(element) {
+        if (!element) {
+            return null;
+        }
+
+        return (
+            element.closest('.seventv-message') ||
+            element.closest(
+                '[class*="seventv-message"]'
+            ) ||
+            element.closest(
+                '[class*="seventv-chat-message"]'
+            ) ||
+            element.closest(
+                '[data-7tv-message-id]'
+            ) ||
+            element.closest(
+                '[data-seventv-message-id]'
+            ) ||
+            element.closest(
+                '[data-a-target="chat-line-message"]'
+            ) ||
+            element.closest(
+                '[data-test-selector="chat-line-message"]'
+            ) ||
+            element.closest(
+                '.chat-line__message'
+            ) ||
+            element
+        );
+    }
+
+    function findChatLines() {
+        const lines =
+            new Set();
+
+        const selectors = [
+            '.seventv-message',
+            '[class*="seventv-message"]',
+            '[class*="seventv-chat-message"]',
+            '[data-7tv-message-id]',
+            '[data-seventv-message-id]',
+
+            '[data-a-target="chat-line-message"]',
+            '[data-test-selector="chat-line-message"]',
+            '.chat-line__message'
+        ];
+
+        document
+            .querySelectorAll(
+                selectors.join(', ')
+            )
+            .forEach(element => {
+                const root =
+                    getChatMessageRoot(
+                        element
+                    );
+
+                if (
+                    root &&
+                    !isChatFilterElement(root)
+                ) {
+                    lines.add(root);
+                }
+            });
+
+        document
+            .querySelectorAll(
+                [
+                    '.chat-author__display-name',
+                    '[data-a-target="chat-message-username"]',
+                    '[data-test-selector="message-username"]',
+                    '[data-test-selector="chat-message-username"]',
+                    '[data-a-user]'
+                ].join(', ')
+            )
+            .forEach(usernameElement => {
+                const root =
+                    getChatMessageRoot(
+                        usernameElement
+                    );
+
+                if (
+                    root &&
+                    !isChatFilterElement(root)
+                ) {
+                    lines.add(root);
+                }
+            });
+
+        return [...lines];
+    }
+
+    function findChatUsernameElement(line) {
+        const selectors = [
+            '.seventv-chat-user-username',
+            '.seventv-user-name',
+            '.seventv-username',
+            '[class*="seventv"][class*="username"]',
+            '[class*="seventv"][class*="user-name"]',
+
+            '.chat-author__display-name',
+            'span.chat-author__display-name',
+            '[data-a-target="chat-message-username"]',
+            '[data-test-selector="message-username"]',
+            '[data-test-selector="chat-message-username"]',
+            '[data-a-user]',
+            '[data-user]',
+            '[data-a-username]'
+        ];
+
+        for (
+            const selector of selectors
+        ) {
+            const element =
+                line.querySelector(
+                    selector
+                );
+
+            if (
+                element &&
+                !isChatFilterElement(
+                    element
+                )
+            ) {
+                return element;
+            }
+        }
+
+        return null;
+    }
+
+    function usernameFromElement(element) {
+        if (!element) {
+            return '';
+        }
+
+        const values = [
+            element.getAttribute(
+                'data-a-user'
+            ),
+            element.getAttribute(
+                'data-user'
+            ),
+            element.getAttribute(
+                'data-a-username'
+            ),
+            element.getAttribute(
+                'data-username'
+            ),
+            element.getAttribute(
+                'aria-label'
+            ),
+            element.textContent
+        ];
+
+        for (const value of values) {
+            const username =
+                normalizeUsername(
+                    value
+                );
+
+            if (
+                username &&
+                username.length <= 50 &&
+                !username.includes(' ') &&
+                !username.includes('\n')
+            ) {
+                return username;
+            }
+        }
+
+        return '';
+    }
+
+    function usernameFromLineText(line) {
+        const text =
+            String(
+                line.textContent || ''
+            )
+                .replace(/\s+/g, ' ')
+                .trim();
+
+        const patterns = [
+            /(?:AM|PM)\s+([a-zA-Z0-9_]{1,50})\s*:/i,
+            /\d{1,2}:\d{2}\s+([a-zA-Z0-9_]{1,50})\s*:/i,
+            /(?:^|\s)([a-zA-Z0-9_]{1,50})\s*:/
+        ];
+
+        for (const pattern of patterns) {
+            const match =
+                text.match(pattern);
+
+            if (match?.[1]) {
+                return normalizeUsername(
+                    match[1]
+                );
+            }
+        }
+
+        return '';
+    }
+
+    function getLineUsername(line) {
+        return (
+            usernameFromElement(
+                findChatUsernameElement(
+                    line
+                )
+            ) ||
+            usernameFromLineText(
+                line
+            )
+        );
+    }
+
+    function findChatMessageBody(line) {
+        const selectors = [
+            '.seventv-message-content',
+            '.seventv-chat-message-content',
+            '[class*="seventv"][class*="message-content"]',
+            '[class*="seventv"][class*="message-body"]',
+
+            '[data-a-target="chat-line-message-body"]',
+            '[data-a-target="chat-message-text"]',
+            '[data-test-selector="chat-message-text"]',
+            '.chat-line__message-container'
+        ];
+
+        for (
+            const selector of selectors
+        ) {
+            const body =
+                line.querySelector(
+                    selector
+                );
+
+            if (body) {
+                return body;
+            }
+        }
+
+        return line;
+    }
+
+    function collectVisibleChatUsers() {
+        const users =
+            new Map();
+
+        findChatLines()
+            .forEach(line => {
+                const username =
+                    getLineUsername(line);
+
+                if (!username) {
+                    return;
+                }
+
+                users.set(
+                    username,
+                    (users.get(username) || 0) + 1
+                );
+            });
+
+        hiddenChatUsers.forEach(
+            username => {
+                if (!users.has(username)) {
+                    users.set(
+                        username,
+                        0
+                    );
+                }
+            }
+        );
+
+        return [...users.entries()]
+            .sort(
+                (first, second) => {
+                    if (
+                        second[1] !==
+                        first[1]
+                    ) {
+                        return (
+                            second[1] -
+                            first[1]
+                        );
+                    }
+
+                    return first[0]
+                        .localeCompare(
+                            second[0]
+                        );
+                }
+            );
+    }
+
+    // =========================================================
+    // FEATURE 3 — MENTION FILTER
+    // =========================================================
+
+    function isChatUsernameNode(element) {
+        if (!element) {
+            return false;
+        }
+
+        return Boolean(
+            element.closest(
+                [
+                    '.seventv-chat-user-username',
+                    '.seventv-user-name',
+                    '.seventv-username',
+                    '[class*="seventv"][class*="username"]',
+                    '[class*="seventv"][class*="user-name"]',
+                    '.chat-author__display-name',
+                    '[data-a-target="chat-message-username"]',
+                    '[data-test-selector="message-username"]',
+                    '[data-test-selector="chat-message-username"]'
+                ].join(', ')
+            )
+        );
+    }
+
+    function collectChatTextNodes(root) {
+        const nodes = [];
+
+        const walker =
+            document.createTreeWalker(
+                root,
+                NodeFilter.SHOW_TEXT,
+                {
+                    acceptNode(node) {
+                        const parent =
+                            node.parentElement;
+
+                        if (!parent) {
+                            return NodeFilter
+                                .FILTER_REJECT;
+                        }
+
+                        if (
+                            isChatUsernameNode(
+                                parent
+                            ) ||
+                            isChatFilterElement(
+                                parent
+                            )
+                        ) {
+                            return NodeFilter
+                                .FILTER_REJECT;
+                        }
+
+                        if (
+                            parent.matches(
+                                'script, style'
+                            )
+                        ) {
+                            return NodeFilter
+                                .FILTER_REJECT;
+                        }
+
+                        return NodeFilter
+                            .FILTER_ACCEPT;
+                    }
+                }
+            );
+
+        let node;
+
+        while (
+            (node = walker.nextNode())
+        ) {
+            nodes.push(node);
+        }
+
+        return nodes;
+    }
+
+    function getOriginalChatTextRecord(
+        node
+    ) {
+        const currentText =
+            node.nodeValue || '';
+
+        let record =
+            originalChatTextNodes.get(
+                node
+            );
+
+        if (!record) {
+            record = {
+                original: currentText,
+                filtered: currentText
+            };
+
+            originalChatTextNodes.set(
+                node,
+                record
+            );
+
+            return record;
+        }
+
+        if (
+            currentText !== record.original &&
+            currentText !== record.filtered
+        ) {
+            record.original =
+                currentText;
+
+            record.filtered =
+                currentText;
+        }
+
+        return record;
+    }
+
+    function restoreChatMessageText(body) {
+        collectChatTextNodes(body)
+            .forEach(node => {
+                const record =
+                    getOriginalChatTextRecord(
+                        node
+                    );
+
+                node.nodeValue =
+                    record.original;
+            });
+    }
+
+    function removeHiddenChatNames(text) {
+        let result =
+            String(text || '');
+
+        hiddenChatUsers.forEach(
+            username => {
+                if (!username) {
+                    return;
+                }
+
+                const escaped =
+                    escapeRegExp(
+                        username
+                    );
+
+                const expression =
+                    new RegExp(
+                        `@?${escaped}(?![\\w])`,
+                        'gi'
+                    );
+
+                result =
+                    result.replace(
+                        expression,
+                        ''
+                    );
+            }
+        );
+
+        return result
+            .replace(/[ \t]{2,}/g, ' ')
+            .replace(
+                /\s+([,.;:!?])/g,
+                '$1'
+            )
+            .replace(
+                /^[,.;:!?\s]+/,
+                ''
+            )
+            .trim();
+    }
+
+    function filterChatMessageText(body) {
+        collectChatTextNodes(body)
+            .forEach(node => {
+                const record =
+                    getOriginalChatTextRecord(
+                        node
+                    );
+
+                record.filtered =
+                    removeHiddenChatNames(
+                        record.original
+                    );
+
+                node.nodeValue =
+                    record.filtered;
+            });
+    }
+
+    function getVisibleChatMessageText(
+        body
+    ) {
+        const clone =
+            body.cloneNode(true);
+
+        clone
+            .querySelectorAll(
+                [
+                    '.seventv-chat-user-username',
+                    '.seventv-user-name',
+                    '.seventv-username',
+                    '[class*="seventv"][class*="username"]',
+                    '[class*="seventv"][class*="user-name"]',
+                    '.chat-author__display-name',
+                    '[data-a-target="chat-message-username"]',
+                    '[data-test-selector="message-username"]',
+                    '[data-test-selector="chat-message-username"]'
+                ].join(', ')
+            )
+            .forEach(element => {
+                element.remove();
+            });
+
+        return String(
+            clone.textContent || ''
+        )
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function applyChatFilter() {
+        findChatLines()
+            .forEach(line => {
+                const username =
+                    getLineUsername(line);
+
+                if (!username) {
+                    return;
+                }
+
+                const body =
+                    findChatMessageBody(
+                        line
+                    );
+
+                restoreChatMessageText(
+                    body
+                );
+
+                line.classList.remove(
+                    'tm-chat-filter-hidden-message'
+                );
+
+                if (
+                    hiddenChatUsers.has(
+                        username
+                    )
+                ) {
+                    line.classList.add(
+                        'tm-chat-filter-hidden-message'
+                    );
+
+                    return;
+                }
+
+                if (
+                    hiddenChatUsers.size > 0
+                ) {
+                    filterChatMessageText(
+                        body
+                    );
+
+                    if (
+                        !getVisibleChatMessageText(
+                            body
+                        )
+                    ) {
+                        line.classList.add(
+                            'tm-chat-filter-hidden-message'
+                        );
+                    }
+                }
+            });
+    }
+
+    function restoreAllChatMessages() {
+        findChatLines()
+            .forEach(line => {
+                line.classList.remove(
+                    'tm-chat-filter-hidden-message'
+                );
+
+                restoreChatMessageText(
+                    findChatMessageBody(
+                        line
+                    )
+                );
+            });
+    }
+
+    // =========================================================
+    // FEATURE 3 — FIND STREAM CHAT HEADER
+    // =========================================================
+
+    function findStreamChatTitle() {
+        const candidates = [
+            ...document.querySelectorAll(
+                'h1, h2, h3, span, div, p'
+            )
+        ];
+
+        return candidates.find(
+            element => {
+                if (
+                    !isVisible(element) ||
+                    isChatFilterElement(
+                        element
+                    )
+                ) {
+                    return false;
+                }
+
+                const ownText = [
+                    ...element.childNodes
+                ]
+                    .filter(node => {
+                        return (
+                            node.nodeType ===
+                            Node.TEXT_NODE
+                        );
+                    })
+                    .map(node => {
+                        return node.textContent;
+                    })
+                    .join(' ')
+                    .trim();
+
+                const text =
+                    ownText ||
+                    String(
+                        element.textContent ||
+                        ''
+                    ).trim();
+
+                return (
+                    text === 'Stream Chat' ||
+                    text === 'Chat' ||
+                    text ===
+                        'Чат трансляции'
+                );
+            }
+        ) || null;
+    }
+
+    function findChatHeader() {
+        const title =
+            findStreamChatTitle();
+
+        if (!title) {
+            return null;
+        }
+
+        let current =
+            title;
+
+        for (
+            let level = 0;
+            level < 7 && current;
+            level++
+        ) {
+            const rect =
+                current
+                    .getBoundingClientRect();
+
+            const computedStyle =
+                getComputedStyle(
+                    current
+                );
+
+            const buttons = [
+                ...current.querySelectorAll(
+                    'button, [role="button"]'
+                )
+            ].filter(button => {
+                if (
+                    !isVisible(button) ||
+                    isChatFilterElement(
+                        button
+                    )
+                ) {
+                    return false;
+                }
+
+                const buttonRect =
+                    button
+                        .getBoundingClientRect();
+
+                return (
+                    buttonRect.top <
+                        rect.bottom &&
+                    buttonRect.bottom >
+                        rect.top
+                );
+            });
+
+            const looksLikeHeader =
+                rect.height >= 35 &&
+                rect.height <= 70 &&
+                rect.width >= 180 &&
+                (
+                    computedStyle.display ===
+                        'flex' ||
+                    computedStyle.display ===
+                        'grid' ||
+                    buttons.length > 0
+                );
+
+            if (looksLikeHeader) {
+                return current;
+            }
+
+            current =
+                current.parentElement;
+        }
+
+        return title.parentElement;
+    }
+
+    function findCommunityButton() {
+        const header =
+            findChatHeader();
+
+        if (!header) {
+            return null;
+        }
+
+        const exactSelectors = [
+            'button[data-a-target="chat-viewer-list-button"]',
+            '[data-a-target="chat-viewer-list-button"]',
+            'button[aria-label*="Community" i]',
+            'button[title*="Community" i]',
+            'button[aria-label*="Users in Chat" i]',
+            'button[title*="Users in Chat" i]',
+            'button[aria-label*="Viewers" i]',
+            'button[title*="Viewers" i]',
+            'button[aria-label*="Сообщество" i]',
+            'button[title*="Сообщество" i]'
+        ];
+
+        for (
+            const selector of
+            exactSelectors
+        ) {
+            const element =
+                header.querySelector(
+                    selector
+                );
+
+            if (
+                element &&
+                isVisible(element) &&
+                !isChatFilterElement(
+                    element
+                )
+            ) {
+                return (
+                    element.closest(
+                        'button'
+                    ) ||
+                    element.closest(
+                        '[role="button"]'
+                    ) ||
+                    element
+                );
+            }
+        }
+
+        const headerRect =
+            header.getBoundingClientRect();
+
+        const buttons = [
+            ...header.querySelectorAll(
+                'button, [role="button"]'
+            )
+        ].filter(button => {
+            if (
+                !isVisible(button) ||
+                isChatFilterElement(
+                    button
+                )
+            ) {
+                return false;
+            }
+
+            const rect =
+                button
+                    .getBoundingClientRect();
+
+            return (
+                rect.width >= 20 &&
+                rect.width <= 55 &&
+                rect.height >= 20 &&
+                rect.height <= 55 &&
+                rect.top >=
+                    headerRect.top - 5 &&
+                rect.bottom <=
+                    headerRect.bottom + 5
+            );
+        });
+
+        if (
+            buttons.length === 0
+        ) {
+            return null;
+        }
+
+        buttons.sort(
+            (first, second) => {
+                return (
+                    second
+                        .getBoundingClientRect()
+                        .left -
+                    first
+                        .getBoundingClientRect()
+                        .left
+                );
+            }
+        );
+
+        return buttons[0];
+    }
+
+    // =========================================================
+    // FEATURE 3 — HEADER BUTTON
+    // =========================================================
+
+    function chatFilterIconSvg() {
+        return `
+            <svg
+                viewBox="0 0 20 20"
+                aria-hidden="true"
+                focusable="false"
+            >
+                <path d="
+                    M8.5 2.5
+                    C6.43 2.5 4.75 4.18 4.75 6.25
+                    C4.75 8.32 6.43 10 8.5 10
+                    C10.57 10 12.25 8.32 12.25 6.25
+                    C12.25 4.18 10.57 2.5 8.5 2.5
+                    Z
+
+                    M8.5 11.5
+                    C4.6 11.5 2 13.8 2 17
+                    H12.8
+                    C12.8 14.9 11.8 13.2 10.2 12.3
+                    C9.7 12 9.1 11.7 8.5 11.5
+                    Z
+                "></path>
+
+                <path d="
+                    M14.7 10.5
+                    H18
+                    V12
+                    H14.7
+                    Z
+
+                    M13.5 13.2
+                    H18
+                    V14.7
+                    H13.5
+                    Z
+
+                    M15.7 15.9
+                    H18
+                    V17.4
+                    H15.7
+                    Z
+                "></path>
+            </svg>
+        `;
+    }
+
+    function injectChatHeaderButton() {
+        const communityButton =
+            findCommunityButton();
+
+        if (
+            !communityButton ||
+            !communityButton.parentElement
+        ) {
+            return;
+        }
+
+        let root =
+            document.querySelector(
+                '.tm-chat-filter-header-root'
+            );
+
+        if (!root) {
+            root =
+                document.createElement(
+                    'div'
+                );
+
+            root.className =
+                'tm-chat-filter-header-root';
+
+            const button =
+                document.createElement(
+                    'button'
+                );
+
+            button.type =
+                'button';
+
+            button.className =
+                'tm-chat-filter-header-button';
+
+            button.title =
+                'Hide chat users';
+
+            button.setAttribute(
+                'aria-label',
+                'Hide chat users'
+            );
+
+            button.innerHTML =
+                chatFilterIconSvg();
+
+            root.appendChild(
+                button
+            );
+
+            button.addEventListener(
+                'click',
+                event => {
+                    stopEvent(event);
+
+                    isChatPanelOpen =
+                        !isChatPanelOpen;
+
+                    if (
+                        isChatPanelOpen
+                    ) {
+                        draftHiddenChatUsers =
+                            new Set(
+                                hiddenChatUsers
+                            );
+
+                        renderChatUserList();
+
+                        requestAnimationFrame(
+                            positionChatPanel
+                        );
+                    }
+
+                    updateChatPanelVisibility();
+                },
+                true
+            );
+        }
+
+        if (
+            root.parentElement !==
+                communityButton.parentElement ||
+            root.nextElementSibling !==
+                communityButton
+        ) {
+            communityButton
+                .parentElement
+                .insertBefore(
+                    root,
+                    communityButton
+                );
+        }
+    }
+
+    // =========================================================
+    // FEATURE 3 — PANEL
+    // =========================================================
+
+    function createChatPanel() {
+        if (
+            chatPanel &&
+            chatPanel.isConnected
+        ) {
+            return;
+        }
+
+        chatPanel =
+            document.createElement(
+                'div'
+            );
+
+        chatPanel.className =
+            'tm-chat-filter-panel';
+
+        const titleRow =
+            document.createElement(
+                'div'
+            );
+
+        titleRow.className =
+            'tm-chat-filter-title-row';
+
+        const title =
+            document.createElement(
+                'div'
+            );
+
+        title.className =
+            'tm-chat-filter-title';
+
+        title.textContent =
+            'Hide chat users';
+
+        const count =
+            document.createElement(
+                'div'
+            );
+
+        count.className =
+            'tm-chat-filter-count';
+
+        titleRow.append(
+            title,
+            count
+        );
+
+        chatUsersContainer =
+            document.createElement(
+                'div'
+            );
+
+        chatUsersContainer.className =
+            'tm-chat-filter-users';
+
+        const actions =
+            document.createElement(
+                'div'
+            );
+
+        actions.className =
+            'tm-chat-filter-actions';
+
+        const saveButton =
+            document.createElement(
+                'button'
+            );
+
+        saveButton.type =
+            'button';
+
+        saveButton.className =
+            'tm-chat-filter-action ' +
+            'tm-chat-filter-save';
+
+        saveButton.textContent =
+            'Save';
+
+        const resetButton =
+            document.createElement(
+                'button'
+            );
+
+        resetButton.type =
+            'button';
+
+        resetButton.className =
+            'tm-chat-filter-action ' +
+            'tm-chat-filter-reset';
+
+        resetButton.textContent =
+            'Reset';
+
+        const refreshButton =
+            document.createElement(
+                'button'
+            );
+
+        refreshButton.type =
+            'button';
+
+        refreshButton.className =
+            'tm-chat-filter-action ' +
+            'tm-chat-filter-refresh';
+
+        refreshButton.textContent =
+            '↻';
+
+        refreshButton.title =
+            'Refresh user list';
+
+        actions.append(
+            saveButton,
+            resetButton,
+            refreshButton
+        );
+
+        chatPanel.append(
+            titleRow,
+            chatUsersContainer,
+            actions
+        );
+
+        document.body.appendChild(
+            chatPanel
+        );
+
+        saveButton.addEventListener(
+            'click',
+            event => {
+                stopEvent(event);
+
+                hiddenChatUsers =
+                    new Set(
+                        draftHiddenChatUsers
+                    );
+
+                saveHiddenChatUsers();
+
+                isChatPanelOpen =
+                    false;
+
+                updateChatPanelVisibility();
+                applyChatFilter();
+            },
+            true
+        );
+
+        resetButton.addEventListener(
+            'click',
+            event => {
+                stopEvent(event);
+
+                hiddenChatUsers.clear();
+                draftHiddenChatUsers.clear();
+
+                saveHiddenChatUsers();
+
+                restoreAllChatMessages();
+                renderChatUserList();
+                applyChatFilter();
+            },
+            true
+        );
+
+        refreshButton.addEventListener(
+            'click',
+            event => {
+                stopEvent(event);
+
+                renderChatUserList();
+                positionChatPanel();
+            },
+            true
+        );
+    }
+
+    function renderChatUserList() {
+        createChatPanel();
+
+        chatUsersContainer.textContent =
+            '';
+
+        const users =
+            collectVisibleChatUsers();
+
+        const countElement =
+            chatPanel.querySelector(
+                '.tm-chat-filter-count'
+            );
+
+        if (countElement) {
+            countElement.textContent =
+                `${users.length} users`;
+        }
+
+        if (
+            users.length === 0
+        ) {
+            const empty =
+                document.createElement(
+                    'div'
+                );
+
+            empty.className =
+                'tm-chat-filter-empty-list';
+
+            empty.textContent =
+                'No users found in chat yet';
+
+            chatUsersContainer
+                .appendChild(
+                    empty
+                );
+
+            return;
+        }
+
+        users.forEach(
+            ([
+                username,
+                messageCount
+            ]) => {
+                const row =
+                    document.createElement(
+                        'label'
+                    );
+
+                row.className =
+                    'tm-chat-filter-user-row';
+
+                const checkbox =
+                    document.createElement(
+                        'input'
+                    );
+
+                checkbox.type =
+                    'checkbox';
+
+                checkbox.className =
+                    'tm-chat-filter-user-checkbox';
+
+                checkbox.checked =
+                    draftHiddenChatUsers
+                        .has(username);
+
+                const name =
+                    document.createElement(
+                        'span'
+                    );
+
+                name.className =
+                    'tm-chat-filter-user-name';
+
+                name.textContent =
+                    username;
+
+                const status =
+                    document.createElement(
+                        'span'
+                    );
+
+                status.className =
+                    'tm-chat-filter-user-status';
+
+                status.textContent =
+                    messageCount > 0
+                        ? String(
+                            messageCount
+                        )
+                        : 'hidden';
+
+                checkbox.addEventListener(
+                    'change',
+                    () => {
+                        if (
+                            checkbox.checked
+                        ) {
+                            draftHiddenChatUsers
+                                .add(
+                                    username
+                                );
+                        } else {
+                            draftHiddenChatUsers
+                                .delete(
+                                    username
+                                );
+                        }
+                    }
+                );
+
+                row.append(
+                    checkbox,
+                    name,
+                    status
+                );
+
+                chatUsersContainer
+                    .appendChild(
+                        row
+                    );
+            }
+        );
+    }
+
+    function positionChatPanel() {
+        createChatPanel();
+
+        const button =
+            document.querySelector(
+                '.tm-chat-filter-header-button'
+            );
+
+        const header =
+            findChatHeader();
+
+        if (
+            !button ||
+            !header
+        ) {
+            return;
+        }
+
+        const buttonRect =
+            button.getBoundingClientRect();
+
+        const headerRect =
+            header.getBoundingClientRect();
+
+        const panelWidth =
+            265;
+
+        const gap =
+            7;
+
+        let left =
+            buttonRect.right -
+            panelWidth;
+
+        left = Math.max(
+            headerRect.left + 5,
+            Math.min(
+                left,
+                headerRect.right -
+                    panelWidth -
+                    5
+            )
+        );
+
+        let top =
+            headerRect.bottom +
+            gap;
+
+        const panelHeight =
+            Math.min(
+                470,
+                chatPanel.scrollHeight ||
+                    470
+            );
+
+        if (
+            top + panelHeight >
+            window.innerHeight - 6
+        ) {
+            top = Math.max(
+                6,
+                buttonRect.top -
+                    panelHeight -
+                    gap
+            );
+        }
+
+        chatPanel.style.left =
+            `${Math.round(left)}px`;
+
+        chatPanel.style.top =
+            `${Math.round(top)}px`;
+    }
+
+    function updateChatPanelVisibility() {
+        createChatPanel();
+
+        chatPanel.classList.toggle(
+            'show',
+            isChatPanelOpen
+        );
+
+        const button =
+            document.querySelector(
+                '.tm-chat-filter-header-button'
+            );
+
+        button?.classList.toggle(
+            'active',
+            isChatPanelOpen
+        );
+    }
+
+    // =========================================================
+    // GLOBAL REFRESH
+    // =========================================================
+
+    let refreshScheduled =
+        false;
+
+    function refreshAll() {
+        injectSidebarControls();
+        applySidebarFilter();
+
+        injectInterfaceButton();
+        applyInterfaceVisibility();
+
+        injectChatHeaderButton();
+        createChatPanel();
+        applyChatFilter();
+
+        if (isChatPanelOpen) {
+            positionChatPanel();
+        }
+    }
+
+    function scheduleRefresh() {
+        if (refreshScheduled) {
+            return;
+        }
+
+        refreshScheduled =
+            true;
+
+        requestAnimationFrame(
+            () => {
+                refreshScheduled =
+                    false;
+
+                refreshAll();
+            }
+        );
+    }
+
+    const observer =
+        new MutationObserver(
+            mutations => {
+                const relevant =
+                    mutations.some(
+                        mutation => {
+                            return [
+                                ...mutation
+                                    .addedNodes
+                            ].some(node => {
+                                if (
+                                    node.nodeType !==
+                                    Node.ELEMENT_NODE
+                                ) {
+                                    return false;
+                                }
+
+                                return (
+                                    !isChatFilterElement(
+                                        node
+                                    ) &&
+                                    !node.classList
+                                        ?.contains(
+                                            'tm-control-checkbox'
+                                        ) &&
+                                    !node.classList
+                                        ?.contains(
+                                            'streamer-filter-chk'
+                                        )
+                                );
+                            });
+                        }
+                    );
+
+                if (relevant) {
+                    scheduleRefresh();
+                }
+            }
+        );
+
+    observer.observe(
+        document.body,
+        {
+            childList: true,
+            subtree: true
+        }
+    );
+
+    window.addEventListener(
+        'resize',
+        () => {
+            if (
+                isChatPanelOpen
+            ) {
+                positionChatPanel();
+            }
+        }
+    );
+
+    window.addEventListener(
+        'scroll',
+        () => {
+            if (
+                isChatPanelOpen
+            ) {
+                positionChatPanel();
+            }
+        },
+        true
+    );
+
+    document.addEventListener(
+        'click',
+        event => {
+            if (
+                !isChatPanelOpen
+            ) {
+                return;
+            }
+
+            if (
+                !(event.target instanceof Element)
+            ) {
+                return;
+            }
+
+            if (
+                event.target.closest(
+                    '.tm-chat-filter-panel'
+                ) ||
+                event.target.closest(
+                    '.tm-chat-filter-header-root'
+                )
+            ) {
+                return;
+            }
+
+            isChatPanelOpen =
+                false;
+
+            updateChatPanelVisibility();
+        },
+        true
+    );
+
+    /*
+     * 7TV может самостоятельно перерисовывать сообщения,
+     * поэтому чат периодически фильтруется повторно.
+     */
+    setInterval(
+        () => {
+            applyChatFilter();
+
+            if (
+                isChatPanelOpen
+            ) {
+                positionChatPanel();
+            }
+        },
+        500
+    );
+
+    refreshAll();
+})();
